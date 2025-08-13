@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Report Viewer & Enhancer</title>
+<style>
+  :root{
+    --bg:#0b0f14; --card:#121822; --muted:#8aa1b1; --text:#e9f0f6; --accent:#78d3ff;
+    --ring: rgba(120,211,255,.35); --card-border: rgba(255,255,255,.08);
+    --table-head:#f8fafc; --table-border:#e5e7eb; --table-row:#ffffff; --table-text:#0b1220;
+  }
+  [data-theme="light"]{
+    --bg:#f6f8fa; --card:#ffffff; --muted:#57606a; --text:#0b1220; --accent:#0ea5e9;
+    --ring: rgba(14,165,233,.25); --card-border:#e5e7eb;
+    --table-head:#f8fafc; --table-border:#e5e7eb; --table-row:#ffffff; --table-text:#0b1220;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%, #132034 0%, #0b0f14 60%);color:var(--text);
+       font:14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans", sans-serif}
+  [data-theme="light"] body{ background:#f6f8fa; }
+  .wrap{max-width:1100px;margin:32px auto;padding:0 16px}
+  .panel{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+         border:1px solid var(--card-border);border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.15);backdrop-filter:blur(6px);padding:18px}
+  .barrow{display:flex;justify-content:space-between;gap:10px;margin-bottom:10px}
+  .btn{padding:10px 12px;border-radius:10px;border:1px solid var(--card-border);background:#0f1520;color:var(--text);cursor:pointer}
+  [data-theme="light"] .btn{ background:#fff; }
+  .btn-accent{ background:var(--accent); color:#041018; border-color:transparent; }
+  h1{margin:0 0 6px;font-size:28px}
+  p.sub{margin:0 0 16px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:1fr 2fr;gap:16px}
+  .card{background:#0f1520;border:1px solid var(--card-border);border-radius:14px;padding:14px}
+  [data-theme="light"] .card{ background:#fff; }
+  label{display:block;margin-bottom:8px;color:var(--muted)}
+  select, input[type="file"], input[type="search"], input[type="password"], input[type="text"], button{
+    width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--card-border);background:#0f1520;color:var(--text)
+  }
+  [data-theme="light"] select,[data-theme="light"] input,[data-theme="light"] button{ background:#fff; }
+  .row{display:flex;gap:10px;align-items:center}
+  .pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--card-border);color:var(--muted);font-size:12px}
+  .drop{border:2px dashed #3a4a62;border-radius:12px;padding:18px;text-align:center;color:#b8c5d3}
+  .drop.drag{border-color:#78d3ff;color:#e9f0f6;box-shadow:0 0 0 4px var(--ring)}
+  .report-tools{display:flex;gap:.5rem;align-items:center;margin:8px 0 12px}
+  .report-tools input{flex:1;min-width:200px}
+  .report-wrap{overflow:auto;border:1px solid var(--table-border);border-radius:12px;background:#fff}
+  table{border-collapse:separate;border-spacing:0;width:100%;min-width:900px;color:var(--table-text)}
+  thead th{position:sticky;top:0;background:var(--table-head);border-bottom:1px solid var(--table-border);padding:.6rem .7rem;white-space:nowrap}
+  tbody td{padding:.55rem .7rem;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+  tfoot td{padding:.7rem;border-top:2px solid #e2e8f0;font-weight:600;background:#fafafa;position:sticky;bottom:0}
+  th.sortable{cursor:pointer}
+  th.sortable::after{content:"⇵";opacity:.35;margin-left:.35rem;font-size:.8em}
+  th.sortable.asc::after{content:"▲";opacity:.8}
+  th.sortable.desc::after{content:"▼";opacity:.8}
+  .num{text-align:right;white-space:nowrap}
+  .bar{height:8px;border-radius:999px;background:linear-gradient(90deg,#c7d2fe,#60a5fa);opacity:.6}
+  .muted{color:#64748b}
+  .hint{font-size:12px;color:#93a3b5;margin-top:6px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="barrow">
+      <a class="btn" href="/reports/">← Back to Reports</a>
+      <button id="themeToggle" class="btn" title="Toggle theme">🌗 Theme</button>
+    </div>
+
+    <div class="panel">
+      <h1>Report Viewer & Enhancer</h1>
+      <p class="sub">Drop a CSV or DBeaver HTML export, or load one from <code>/exports</code>. Enhance it, then <b>Upload to /exports</b> directly.</p>
+
+      <div class="grid">
+        <!-- Controls -->
+        <div class="card">
+          <label>Load from repository</label>
+          <div class="row">
+            <select id="repoFiles"><option>Loading…</option></select>
+            <button id="btnLoad">Open</button>
+          </div>
+          <div class="hint">Files are read from <code>/reports/exports</code>.</div>
+
+          <hr style="border-color:var(--card-border);margin:14px 0">
+
+          <label>Or import a local file</label>
+          <div id="drop" class="drop">Drag & drop a CSV or HTML here, or click to choose</div>
+          <input id="file" type="file" accept=".csv,.html,.htm,text/csv,text/html" style="display:none" />
+
+          <hr style="border-color:var(--card-border);margin:14px 0">
+
+          <label>Options</label>
+          <div class="row">
+            <select id="currency">
+              <option value="">Currency: none</option>
+              <option>USD</option><option>GBP</option><option>EUR</option><option>AUD</option><option>CAD</option>
+            </select>
+            <select id="decimals">
+              <option value="0">0 decimals</option>
+              <option value="2" selected>2 decimals</option>
+              <option value="3">3 decimals</option>
+            </select>
+          </div>
+
+          <hr style="border-color:var(--card-border);margin:14px 0">
+
+          <label>GitHub (optional, for auto-upload to <code>/exports</code>)</label>
+          <div class="row">
+            <input id="ghToken" type="password" placeholder="Paste GitHub fine-grained PAT (repo: contents read/write)" />
+          </div>
+          <div class="hint">Token is used client-side only and not stored after the tab closes.</div>
+
+          <hr style="border-color:var(--card-border);margin:14px 0">
+
+          <div class="row">
+            <button id="btnUpload" class="btn-accent" title="Commit enhanced HTML to /exports">Upload to /exports</button>
+            <button id="btnDownloadHTML">Download enhanced HTML</button>
+            <button id="btnCSV">Download CSV</button>
+            <button id="btnPrint">Print</button>
+          </div>
+          <div style="margin-top:8px"><span id="meta" class="pill">No file loaded</span></div>
+        </div>
+
+        <!-- Output -->
+        <div class="card">
+          <div class="report-tools" id="tools" style="display:none">
+            <input id="filterBox" type="search" placeholder="Search…" aria-label="Search" />
+            <span id="rowCount" class="muted"></span>
+          </div>
+          <div class="report-wrap" id="outWrap" style="display:none">
+            <table id="outTable"><thead></thead><tbody></tbody></table>
+          </div>
+          <div id="placeholder" class="muted">Open or drop a file to begin.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ====== CONFIG ======
+const OWNER  = "cameron-spree";
+const REPO   = "reports";
+const FOLDER = "exports";
+const BASE_PATH = "/reports"; // Pages project path
+// ====================
+
+// Theme
+const root = document.documentElement;
+const savedTheme = localStorage.getItem("theme");
+if (savedTheme) root.setAttribute("data-theme", savedTheme);
+document.getElementById("themeToggle").onclick = () => {
+  const next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  root.setAttribute("data-theme", next);
+  localStorage.setItem("theme", next);
+};
+
+const $repoFiles = document.getElementById("repoFiles");
+const $btnLoad   = document.getElementById("btnLoad");
+const $drop      = document.getElementById("drop");
+const $file      = document.getElementById("file");
+const $currency  = document.getElementById("currency");
+const $decimals  = document.getElementById("decimals");
+const $tools     = document.getElementById("tools");
+const $filterBox = document.getElementById("filterBox");
+const $rowCount  = document.getElementById("rowCount");
+const $meta      = document.getElementById("meta");
+const $wrap      = document.getElementById("outWrap");
+const $table     = document.getElementById("outTable");
+const $placeholder = document.getElementById("placeholder");
+const $ghToken = document.getElementById("ghToken");
+const $btnUpload = document.getElementById("btnUpload");
+
+let items = []; // repo files
+let currentFilename = null;
+let isNumeric = [];
+let heads = [];
+
+init();
+
+async function init(){
+  // load repo list
+  try{
+    const apiURL = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(FOLDER)}`;
+    const res = await fetch(apiURL, { headers:{ "Accept":"application/vnd.github.v3+json" }});
+    const data = await res.json();
+    items = (Array.isArray(data)?data:[])
+      .filter(it => it.type === "file" && /\.(csv|html?)$/i.test(it.name))
+      .sort((a,b)=> a.name.localeCompare(b.name,undefined,{numeric:true}));
+    $repoFiles.innerHTML = items.length
+      ? items.map(it=>`<option value="${it.name}">${it.name}</option>`).join("")
+      : `<option value="">(No files in /${FOLDER} yet)</option>`;
+  } catch(e){
+    console.error(e);
+    $repoFiles.innerHTML = `<option value="">(Couldn’t load repo files)</option>`;
+  }
+
+  // wire up UI
+  $btnLoad.addEventListener("click", async ()=>{
+    const name = $repoFiles.value;
+    if (!name) return;
+    const url = `${BASE_PATH}/${FOLDER}/${encodeURIComponent(name)}`;
+    const txt = await (await fetch(url)).text();
+    loadText(txt, name);
+  });
+
+  $drop.addEventListener("click", ()=> $file.click());
+  $drop.addEventListener("dragover", e=>{ e.preventDefault(); $drop.classList.add("drag"); });
+  $drop.addEventListener("dragleave", ()=> $drop.classList.remove("drag"));
+  $drop.addEventListener("drop", e=>{
+    e.preventDefault(); $drop.classList.remove("drag");
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  $file.addEventListener("change", ()=> $file.files[0] && handleFile($file.files[0]));
+
+  document.getElementById("btnDownloadHTML").addEventListener("click", downloadEnhancedHTML);
+  document.getElementById("btnCSV").addEventListener("click", downloadCSV);
+  document.getElementById("btnPrint").addEventListener("click", ()=>window.print());
+  $btnUpload.addEventListener("click", uploadEnhancedToRepo);
+
+  $filterBox.addEventListener("input", filterRows);
+}
+
+/* ==== FILE LOADING ==== */
+async function handleFile(file){
+  const txt = await file.text();
+  loadText(txt, file.name);
+}
+
+function loadText(txt, filename){
+  currentFilename = filename || "report";
+  // detect CSV vs HTML
+  const isCSV = /\.csv$/i.test(filename) || txt.trim().split("\n")[0].includes(",");
+  if (isCSV){
+    const data = parseCSV(txt);
+    renderTableFromArray(data);
+  } else {
+    const dom = new DOMParser().parseFromString(txt, "text/html");
+    const table = dom.querySelector("table");
+    if (!table){ alert("No <table> found in this HTML."); return; }
+    renderTableFromHTML(table);
+  }
+  $meta.textContent = `Loaded: ${filename}`;
+}
+
+/* ==== CSV PARSE ==== */
+function parseCSV(text){
+  const rows = [];
+  let row = [], cell = "", q = false;
+  for (let i=0;i<text.length;i++){
+    const c = text[i], n = text[i+1];
+    if (q){
+      if (c === '"' && n === '"'){ cell += '"'; i++; }
+      else if (c === '"'){ q = false; }
+      else { cell += c; }
+    } else {
+      if (c === '"'){ q = true; }
+      else if (c === ','){ row.push(cell); cell = ""; }
+      else if (c === '\n'){ row.push(cell); rows.push(row); row = []; cell = ""; }
+      else if (c === '\r'){ /* skip */ }
+      else { cell += c; }
+    }
+  }
+  row.push(cell); rows.push(row);
+  return rows.filter(r=>r.length>1 || (r.length===1 && r[0].trim()!==""));
+}
+
+/* ==== RENDERERS ==== */
+function renderTableFromArray(arr){
+  const [header, ...body] = arr;
+  $table.tHead.innerHTML = ""; $table.tBodies[0]?.remove();
+  $table.createTBody();
+  const trh = document.createElement("tr");
+  header.forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    trh.appendChild(th);
+  });
+  $table.tHead.appendChild(trh);
+  body.forEach(r=>{
+    const tr = document.createElement("tr");
+    header.forEach((_,i)=>{
+      const td = document.createElement("td");
+      td.textContent = (r[i] ?? "").trim();
+      tr.appendChild(td);
+    });
+    $table.tBodies[0].appendChild(tr);
+  });
+  enhance();
+}
+
+function renderTableFromHTML(srcTable){
+  const headsSrc = [...(srcTable.tHead?.rows[0]?.cells || srcTable.querySelectorAll("thead th"))].map(th=>th.textContent.trim());
+  const rowsSrc  = [...srcTable.tBodies[0]?.rows || srcTable.querySelectorAll("tbody tr")];
+
+  $table.tHead.innerHTML = ""; $table.tBodies[0]?.remove();
+  $table.createTBody();
+  const trh = document.createElement("tr");
+  (headsSrc.length?headsSrc:[...rowsSrc[0].cells].map((_,i)=>`Col ${i+1}`)).forEach(h=>{
+    const th = document.createElement("th"); th.textContent = h; trh.appendChild(th);
+  });
+  $table.tHead.appendChild(trh);
+  rowsSrc.forEach(r=>{
+    const tr = document.createElement("tr");
+    [...r.cells].forEach(td0=>{
+      const td = document.createElement("td");
+      td.textContent = td0.textContent.trim();
+      tr.appendChild(td);
+    });
+    $table.tBodies[0].appendChild(tr);
+  });
+  enhance();
+}
+
+/* ==== ENHANCEMENTS ==== */
+function enhance(){
+  $placeholder.style.display = "none";
+  $wrap.style.display = "";
+  $tools.style.display = "flex";
+
+  const ths = [...$table.querySelectorAll("thead th")];
+  heads = ths.map(th => th.textContent.trim().toLowerCase());
+  const bodyRows = [...$table.tBodies[0].rows];
+
+  // numeric detection
+  isNumeric = heads.map((h,idx)=>{
+    for (const tr of bodyRows.slice(0,10)) {
+      const v = (tr.cells[idx]?.textContent || "").replace(/[,£$€%\s]/g,"");
+      if (v === "") continue;
+      if (!isNaN(Number(v))) return true;
+    }
+    return false;
+  });
+
+  // sortable headers
+  ths.forEach((th,i)=>{
+    th.classList.add("sortable");
+    th.addEventListener("click", ()=>{
+      const current = th.classList.contains("asc") ? "asc" : th.classList.contains("desc") ? "desc" : null;
+      ths.forEach(x=>x.classList.remove("asc","desc"));
+      const mode = current==="asc" ? "desc" : "asc";
+      th.classList.add(mode);
+      sortTable(i, mode==="asc");
+    });
+  });
+
+  // format & mini bars
+  const idxRevenue = heads.findIndex(h => h.includes("net_revenue") || h.includes("net revenue"));
+  const idxShare   = heads.findIndex(h => h.includes("share_of_store") || h.includes("share of store"));
+  applyFormatting(idxRevenue, idxShare);
+
+  // totals
+  addTotalsRow();
+
+  // search
+  filterRows();
+}
+
+function applyFormatting(idxRevenue, idxShare){
+  const bodyRows = [...$table.tBodies[0].rows];
+  const cur = $currency.value || "";
+  const dec = parseInt($decimals.value||"2",10);
+  const fmtCur = cur ? new Intl.NumberFormat(undefined,{style:"currency",currency:cur,maximumFractionDigits:dec}) : null;
+  const fmtNum = new Intl.NumberFormat();
+
+  bodyRows.forEach(tr=>{
+    [...tr.cells].forEach((td,idx)=>{
+      if (isNumeric[idx]) {
+        const raw = td.textContent.trim();
+        let num = Number(raw.replace(/[,£$€%\s]/g,""));
+        if (!isNaN(num)) {
+          const isPct = /rate|share|%/i.test(heads[idx]);
+          td.classList.add("num");
+          td.textContent = isPct ? (num*100).toFixed(2) + "%" :
+                           fmtCur ? fmtCur.format(num) : fmtNum.format(num);
+        }
+      }
+    });
+
+    if (idxShare >= 0) {
+      const shareCell = tr.cells[idxShare];
+      if (shareCell) {
+        const val = Number((shareCell.textContent||"").replace(/[^\d.]/g,""));
+        if (!isNaN(val)) {
+          const pct = /%/.test(shareCell.textContent) ? val : val*100;
+          const barWrap = document.createElement("div");
+          const bar = document.createElement("div");
+          bar.className = "bar";
+          bar.style.width = Math.max(3, Math.min(100, pct)) + "%";
+          barWrap.appendChild(bar);
+          shareCell.appendChild(barWrap);
+        }
+      }
+    }
+  });
+}
+
+function addTotalsRow(){
+  $table.tFoot && $table.tFoot.remove();
+  const tfoot = $table.createTFoot();
+  const trTot = tfoot.insertRow();
+  const ths = [...$table.querySelectorAll("thead th")];
+  const bodyRows = [...$table.tBodies[0].rows];
+  for (let c=0;c<ths.length;c++){
+    const td = trTot.insertCell();
+    if (c===0){ td.textContent = "Totals"; continue; }
+    if (!isNumeric[c]){ td.textContent = ""; continue; }
+    const sum = bodyRows.reduce((acc,r)=>{
+      if (r.style.display==="none") return acc;
+      const v = (r.cells[c]?.textContent || "").replace(/[^0-9.-]/g,"");
+      const n = Number(v);
+      return isNaN(n) ? acc : acc + n;
+    },0);
+    td.className = "num";
+    const isPct = /rate|share|%/i.test(heads[c]);
+    const cur = $currency.value || "";
+    const dec = parseInt($decimals.value||"2",10);
+    td.textContent = isPct ? sum.toFixed(2) + "%" :
+                     cur ? new Intl.NumberFormat(undefined,{style:"currency",currency:cur,maximumFractionDigits:dec}).format(sum)
+                         : new Intl.NumberFormat().format(sum);
+  }
+}
+
+function filterRows(){
+  const q = ($filterBox.value||"").toLowerCase().trim();
+  const rows = [...$table.tBodies[0].rows];
+  let shown = 0;
+  rows.forEach(r=>{
+    const vis = r.textContent.toLowerCase().includes(q);
+    r.style.display = vis ? "" : "none";
+    if (vis) shown++;
+  });
+  $rowCount.textContent = `${shown} of ${rows.length} rows`;
+  addTotalsRow();
+}
+
+function sortTable(colIndex, asc){
+  const tbody = $table.tBodies[0];
+  const rows = [...tbody.rows].filter(r=>r.style.display!=="none");
+  const num = isNumeric[colIndex];
+  rows.sort((a,b)=>{
+    const av = a.cells[colIndex]?.textContent || "";
+    const bv = b.cells[colIndex]?.textContent || "";
+    if (num){
+      const an = Number(av.replace(/[^0-9.-]/g,""));
+      const bn = Number(bv.replace(/[^0-9.-]/g,""));
+      return asc ? an-bn : bn-an;
+    } else {
+      return asc ? av.localeCompare(bv,undefined,{numeric:true}) :
+                   bv.localeCompare(av,undefined,{numeric:true});
+    }
+  });
+  rows.forEach(r=>tbody.appendChild(r));
+}
+
+/* ==== DOWNLOADS ==== */
+function getEnhancedHTMLString(){
+  const styles = document.querySelector("style").innerHTML;
+  const cur = $currency.value || "";
+  const dec = parseInt($decimals.value||"2",10);
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${(currentFilename||"Report").replace(/_/g," ")}</title>
+<style>${styles}</style></head><body>
+<div class="wrap"><div class="panel">
+<h1>${(currentFilename||"Report").replace(/_/g," ")}</h1>
+<div class="report-tools"><input id="filterBox" type="search" placeholder="Search…"><span id="rowCount" class="muted"></span></div>
+<div class="report-wrap">${document.getElementById("outWrap").innerHTML}</div>
+</div></div>
+<script>
+const currency="${cur}", decimals=${dec};
+(function(){
+  const table=document.querySelector("table");
+  const filter=document.getElementById("filterBox");
+  const rowCount=document.getElementById("rowCount");
+  const ths=[...table.querySelectorAll("thead th")], heads=ths.map(th=>th.textContent.toLowerCase());
+  const rows=[...table.tBodies[0].rows];
+  const isNum=heads.map((h,i)=>rows.slice(0,10).some(r=>!isNaN(Number((r.cells[i]?.textContent||'').replace(/[,£$€%\\s]/g,'')))));
+  ths.forEach((th,i)=>{ th.classList.add('sortable'); th.onclick=()=>{ const asc=!th.classList.contains('asc'); ths.forEach(x=>x.classList.remove('asc','desc')); th.classList.add(asc?'asc':'desc'); sort(i,asc); }; });
+  function fmt(n,isPct){ if(isPct) return (n*100).toFixed(2)+'%'; if(currency){return new Intl.NumberFormat(undefined,{style:'currency',currency:currency,maximumFractionDigits:decimals}).format(n);} return new Intl.NumberFormat().format(n); }
+  const idxShare=heads.findIndex(h=>/share_of_store|share of store/.test(h));
+  rows.forEach(r=>{ [...r.cells].forEach((td,i)=>{ if(isNum[i]){ const v=Number((td.textContent||'').replace(/[^0-9.-]/g,'')); if(!isNaN(v)){ const isPct=/rate|share|%/.test(heads[i]); td.classList.add('num'); td.textContent=fmt(v,isPct);} } }); if(idxShare>=0){ const c=r.cells[idxShare]; if(c){ const v=Number((c.textContent||'').replace(/[^0-9.]/g,'')); if(!isNaN(v)){ const p=/%/.test(c.textContent)?v:v*100; const w=document.createElement('div'); const b=document.createElement('div'); b.className='bar'; b.style.width=Math.max(3,Math.min(100,p))+'%'; w.appendChild(b); c.appendChild(w); } } } });
+  addTotals();
+  filter.oninput=()=>{ const q=(filter.value||'').toLowerCase(); let shown=0; rows.forEach(r=>{ const ok=r.textContent.toLowerCase().includes(q); r.style.display=ok?'':'none'; if(ok) shown++; }); rowCount.textContent = shown+' of '+rows.length+' rows'; addTotals(); };
+  filter.oninput();
+  function addTotals(){ table.tFoot && table.tFoot.remove(); const tfoot=table.createTFoot(); const tr=tfoot.insertRow(); for(let c=0;c<ths.length;c++){ const td=tr.insertCell(); if(c===0){ td.textContent='Totals'; continue; } if(!isNum[c]){ td.textContent=''; continue; } const sum=[...table.tBodies[0].rows].reduce((a,r)=>{ if(r.style.display==='none') return a; const v=Number((r.cells[c]?.textContent||'').replace(/[^0-9.-]/g,'')); return isNaN(v)?a:a+v; },0); td.className='num'; const isPct=/rate|share|%/.test(heads[c]); td.textContent=fmt(sum,isPct); } }
+  function sort(i,asc){ const tb=table.tBodies[0]; const rs=[...tb.rows].filter(r=>r.style.display!=='none'); const num=isNum[i]; rs.sort((a,b)=>{ const av=a.cells[i]?.textContent||''; const bv=b.cells[i]?.textContent||''; if(num){ const an=Number(av.replace(/[^0-9.-]/g,'')); const bn=Number(bv.replace(/[^0-9.-]/g,'')); return asc?an-bn:bn-an; } return asc?av.localeCompare(bv,undefined,{numeric:true}):bv.localeCompare(av,undefined,{numeric:true}); }); rs.forEach(r=>tb.appendChild(r)); }
+})();
+<\/script>
+</body></html>`;
+}
+
+function downloadEnhancedHTML(){
+  const html = getEnhancedHTMLString();
+  const blob = new Blob([html],{type:"text/html"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = (currentFilename||"report").replace(/\.[^.]+$/,"") + "_enhanced.html";
+  a.click();
+}
+
+function downloadCSV(){
+  const ths = [...$table.querySelectorAll("thead th")].map(th=>th.textContent.trim());
+  const rows = [ths.map(csvEsc)];
+  [...$table.tBodies[0].rows].forEach(tr=>{
+    if (tr.style.display==="none") return;
+    rows.push([...tr.cells].map(td=>csvEsc(td.textContent.trim())));
+  });
+  const blob = new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = (currentFilename||"report").replace(/\.[^.]+$/,"") + "_enhanced.csv";
+  a.click();
+}
+function csvEsc(s){ return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; }
+
+/* ==== UPLOAD TO REPO (GitHub Contents API) ==== */
+async function uploadEnhancedToRepo(){
+  const token = $ghToken.value.trim();
+  if (!token){ alert("Paste a GitHub fine-grained PAT with contents:read/write for cameron-spree/reports."); return; }
+  if (!$table.tBodies[0] || !$table.tBodies[0].rows.length){ alert("Load a report first."); return; }
+
+  const html = getEnhancedHTMLString();
+  const filename = (currentFilename||"report").replace(/\.[^.]+$/,"") + "_enhanced.html";
+  const path = `${FOLDER}/${filename}`;
+
+  try{
+    // Check if file exists to get SHA
+    let sha = null;
+    const getRes = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(path)}`);
+    if (getRes.ok){ const info = await getRes.json(); sha = info.sha; }
+
+    const body = {
+      message: `Add ${filename} (uploaded from viewer.html)`,
+      content: btoa(unescape(encodeURIComponent(html))), // base64
+      branch: "main",
+      ...(sha ? { sha } : {})
+    };
+
+    const putRes = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(path)}`, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!putRes.ok){
+      const err = await putRes.json().catch(()=>({message:""}));
+      throw new Error(`GitHub API error ${putRes.status}: ${err.message||"Unknown error"}`);
+    }
+
+    alert(`Uploaded ✅  /${path}\nIt will appear on the homepage in a few seconds.`);
+  } catch(e){
+    console.error(e);
+    alert("Upload failed: " + e.message);
+  }
+}
+</script>
+</body>
+</html>
