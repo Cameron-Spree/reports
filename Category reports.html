@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/><style>
+table {border: medium solid #6495ed;border-collapse: collapse;width: 100%;} th{font-family: monospace;border: thin solid #6495ed;padding: 5px;background-color: #D0E3FA;}th{text-align: left;}td{font-family: sans-serif;border: thin solid #6495ed;padding: 5px;text-align: center;}.odd{background:#e8edff;}img{padding:5px; border:solid; border-color: #dddddd #aaaaaa #aaaaaa #dddddd; border-width: 1px 2px 2px 1px; background-color:white;}</style>
+</head>
+<body>
+<table><tr><th colspan="11"><pre><code>WITH<br>orders_ytd AS (<br>  SELECT ID AS order_id<br>  FROM wp_posts<br>  WHERE post_type = 'shop_order'<br>    AND post_status IN ('wc-completed','wc-processing')<br>    AND post_date &gt;= DATE_FORMAT(CURDATE(), '%Y-01-01')<br>    AND post_date &lt;  (CURDATE() + INTERVAL 1 DAY)<br>),<br>order_lines AS (<br>  SELECT<br>    oi.order_id,<br>    MAX(CASE WHEN oim.meta_key = '_product_id' THEN oim.meta_value END)        AS product_id,<br>    SUM(CASE WHEN oim.meta_key = '_qty'        THEN oim.meta_value END)        AS qty,<br>    SUM(CASE WHEN oim.meta_key = '_line_total' THEN oim.meta_value END)        AS line_total<br>  FROM wp_woocommerce_order_items oi<br>  JOIN wp_woocommerce_order_itemmeta oim<br>    ON oim.order_item_id = oi.order_item_id<br>  WHERE oi.order_item_type = 'line_item'<br>    AND oi.order_id IN (SELECT order_id FROM orders_ytd)<br>  GROUP BY oi.order_id, oi.order_item_id<br>),<br>refund_lines AS (<br>  SELECT<br>    MAX(CASE WHEN oim.meta_key = '_product_id' THEN oim.meta_value END)        AS product_id,<br>    SUM(CASE WHEN oim.meta_key = '_qty'        THEN oim.meta_value END)        AS qty,<br>    SUM(CASE WHEN oim.meta_key = '_line_total' THEN oim.meta_value END)        AS line_total<br>  FROM wp_posts r<br>  JOIN wp_woocommerce_order_items oi ON oi.order_id = r.ID<br>  JOIN wp_woocommerce_order_itemmeta oim ON oim.order_item_id = oi.order_item_id<br>  WHERE r.post_type = 'shop_order_refund'<br>    AND oi.order_item_type = 'line_item'<br>    AND r.post_date &gt;= DATE_FORMAT(CURDATE(), '%Y-01-01')<br>    AND r.post_date &lt;  (CURDATE() + INTERVAL 1 DAY)<br>  GROUP BY oi.order_item_id<br>),<br>cats AS (<br>  SELECT t.term_id, t.name, tt.parent<br>  FROM wp_terms t<br>  JOIN wp_term_taxonomy tt ON tt.term_id = t.term_id<br>  WHERE tt.taxonomy = 'product_cat'<br>),<br>leaf_cats AS (<br>  SELECT c.term_id<br>  FROM cats c<br>  LEFT JOIN cats child ON child.parent = c.term_id<br>  WHERE child.term_id IS NULL<br>),<br>product_primary_cat AS (<br>  SELECT tr.object_id AS product_id,<br>         MIN(tt.term_id) AS category_id<br>  FROM wp_term_relationships tr<br>  JOIN wp_term_taxonomy tt ON tt.term_taxonomy_id = tr.term_taxonomy_id<br>  WHERE tt.taxonomy = 'product_cat'<br>    AND tt.term_id IN (SELECT term_id FROM leaf_cats)<br>  GROUP BY tr.object_id<br>),<br>cat_sales AS (<br>  SELECT<br>    ppc.category_id,<br>    SUM(CAST(ol.line_total AS DECIMAL(18,4))) AS gross_revenue,<br>    SUM(CAST(ol.qty        AS DECIMAL(18,4))) AS units,<br>    COUNT(DISTINCT ol.order_id)                AS orders<br>  FROM order_lines ol<br>  JOIN product_primary_cat ppc ON ppc.product_id = ol.product_id<br>  GROUP BY ppc.category_id<br>),<br>cat_refunds AS (<br>  SELECT<br>    ppc.category_id,<br>    SUM(CAST(rf.line_total AS DECIMAL(18,4))) AS refunds_amount,<br>    SUM(CAST(rf.qty        AS DECIMAL(18,4))) AS refunded_units<br>  FROM refund_lines rf<br>  JOIN product_primary_cat ppc ON ppc.product_id = rf.product_id<br>  GROUP BY ppc.category_id<br>),<br>cat_totals AS (<br>  SELECT<br>    c.term_id                                 AS category_id,<br>    c.name                                    AS category_name,<br>    COALESCE(cs.gross_revenue, 0)             AS gross_revenue,<br>    COALESCE(cr.refunds_amount, 0)            AS refunds_amount,<br>    (COALESCE(cs.gross_revenue, 0) - COALESCE(cr.refunds_amount, 0)) AS net_revenue,<br>    (COALESCE(cs.units, 0) - COALESCE(cr.refunded_units, 0))         AS net_units,<br>    COALESCE(cs.orders, 0)                    AS orders<br>  FROM cats c<br>  LEFT JOIN cat_sales cs   ON cs.category_id = c.term_id<br>  LEFT JOIN cat_refunds cr ON cr.category_id = c.term_id<br>)<br>SELECT<br>  ct.category_id,<br>  ct.category_name,<br>  ROUND(ct.net_revenue, 2)                 AS net_revenue_ytd,<br>  ROUND(ct.gross_revenue, 2)               AS gross_revenue_ytd,<br>  ROUND(ct.refunds_amount, 2)              AS refunds_ytd,<br>  CASE WHEN ct.gross_revenue &gt; 0<br>       THEN ROUND(ct.refunds_amount / ct.gross_revenue, 4)<br>       ELSE 0 END                          AS refund_rate,<br>  ct.net_units                             AS units_ytd,<br>  ct.orders                                AS orders_ytd,<br>  CASE WHEN ct.net_units &gt; 0<br>       THEN ROUND(ct.net_revenue / ct.net_units, 2)<br>       ELSE NULL END                       AS avg_selling_price,<br>  ROUND(ct.net_revenue / NULLIF(SUM(ct.net_revenue) OVER (), 0), 4)<br>                                           AS share_of_store_ytd,<br>  DENSE_RANK() OVER (ORDER BY ct.net_revenue DESC) AS revenue_rank<br>FROM cat_totals ct<br>WHERE ct.net_revenue IS NOT NULL<br>ORDER BY ct.net_revenue DESC</code></pre></th></tr><tr><th>category_id</th><th>category_name</th><th>net_revenue_ytd</th><th>gross_revenue_ytd</th><th>refunds_ytd</th><th>refund_rate</th><th>units_ytd</th><th>orders_ytd</th><th>avg_selling_price</th><th>share_of_store_ytd</th><th>revenue_rank</th></tr><tr class="odd"><td>163</td><td>Fence Panels</td><td>17,898.28</td><td>17,898.28</td><td>0</td><td>0</td><td>495</td><td>128</td><td>36.16</td><td>0.1021</td><td>1</td></tr>
+<tr><td>71</td><td>Lawn Mowers</td><td>14,380.08</td><td>13,304.49</td><td>-1,075.59</td><td>-0.0808</td><td>21</td><td>18</td><td>684.77</td><td>0.0821</td><td>2</td></tr>
+<tr class="odd"><td>111</td><td>Fence Posts</td><td>10,991.18</td><td>10,899.43</td><td>-91.74</td><td>-0.0084</td><td>792</td><td>169</td><td>13.88</td><td>0.0627</td><td>3</td></tr>
+<tr><td>63</td><td>Scythes</td><td>9,155.74</td><td>9,155.74</td><td>0</td><td>0</td><td>291</td><td>151</td><td>31.46</td><td>0.0522</td><td>4</td></tr>
+<tr class="odd"><td>223</td><td>Sleepers</td><td>8,937.77</td><td>8,937.77</td><td>0</td><td>0</td><td>429</td><td>53</td><td>20.83</td><td>0.051</td><td>5</td></tr>
+<tr><td>78</td><td>Hedge Trimmers</td><td>7,530.84</td><td>7,530.84</td><td>0</td><td>0</td><td>28</td><td>26</td><td>268.96</td><td>0.043</td><td>6</td></tr>
+<tr class="odd"><td>117</td><td>Cordless Accessories</td><td>7,252.39</td><td>7,252.39</td><td>0</td><td>0</td><td>67</td><td>34</td><td>108.24</td><td>0.0414</td><td>7</td></tr>
+<tr><td>233</td><td>Closeboard Fencing</td><td>6,337.9</td><td>6,325.78</td><td>-12.12</td><td>-0.0019</td><td>3,071</td><td>88</td><td>2.06</td><td>0.0362</td><td>8</td></tr>
+<tr class="odd"><td>120</td><td>SILKY Saws</td><td>4,432.17</td><td>4,432.17</td><td>0</td><td>0</td><td>63</td><td>38</td><td>70.35</td><td>0.0253</td><td>9</td></tr>
+<tr><td>268</td><td>Trellis Panels</td><td>4,403.78</td><td>4,343.3</td><td>-60.48</td><td>-0.0139</td><td>164</td><td>48</td><td>26.85</td><td>0.0251</td><td>10</td></tr>
+<tr class="odd"><td>254</td><td>Decking Supplies</td><td>4,018.12</td><td>4,018.12</td><td>0</td><td>0</td><td>477</td><td>38</td><td>8.42</td><td>0.0229</td><td>11</td></tr>
+<tr><td>113</td><td>Gates</td><td>3,648.56</td><td>3,648.56</td><td>0</td><td>0</td><td>1,327</td><td>27</td><td>2.75</td><td>0.0208</td><td>12</td></tr>
+<tr class="odd"><td>31</td><td>Chainsaw Mills for Timber Milling</td><td>3,637.37</td><td>3,637.37</td><td>0</td><td>0</td><td>47</td><td>30</td><td>77.39</td><td>0.0208</td><td>13</td></tr>
+<tr><td>210</td><td>Rails</td><td>3,620.27</td><td>3,603.42</td><td>-16.85</td><td>-0.0047</td><td>600</td><td>72</td><td>6.03</td><td>0.0207</td><td>14</td></tr>
+<tr class="odd"><td>197</td><td>Wooden Stakes and Round Rails</td><td>3,146.03</td><td>3,127.98</td><td>-18.05</td><td>-0.0058</td><td>613</td><td>43</td><td>5.13</td><td>0.018</td><td>15</td></tr>
+<tr><td>314</td><td>Cordless Chainsaws</td><td>2,928.22</td><td>2,928.22</td><td>0</td><td>0</td><td>13</td><td>13</td><td>225.25</td><td>0.0167</td><td>16</td></tr>
+<tr class="odd"><td>100</td><td>Postcrete and Cement</td><td>2,829.31</td><td>2,829.31</td><td>0</td><td>0</td><td>630</td><td>111</td><td>4.49</td><td>0.0161</td><td>17</td></tr>
+<tr><td>97</td><td>Billhooks - Hedge Laying Tools</td><td>2,717.14</td><td>2,696.31</td><td>-20.83</td><td>-0.0077</td><td>146</td><td>126</td><td>18.61</td><td>0.0155</td><td>18</td></tr>
+<tr class="odd"><td>73</td><td>Leaf Blowers and Vacuum Shredders</td><td>2,709.46</td><td>2,709.46</td><td>0</td><td>0</td><td>11</td><td>9</td><td>246.31</td><td>0.0155</td><td>19</td></tr>
+<tr><td>214</td><td>Cladding</td><td>2,628.24</td><td>2,628.24</td><td>0</td><td>0</td><td>337</td><td>22</td><td>7.8</td><td>0.015</td><td>20</td></tr>
+<tr class="odd"><td>878</td><td>Electric Pressure Washers</td><td>2,569.29</td><td>2,569.29</td><td>0</td><td>0</td><td>10</td><td>10</td><td>256.93</td><td>0.0147</td><td>21</td></tr>
+<tr><td>894</td><td>Aggregates &amp;amp; Garden Gravel</td><td>2,403.6</td><td>2,364.35</td><td>-39.26</td><td>-0.0166</td><td>154</td><td>30</td><td>15.61</td><td>0.0137</td><td>22</td></tr>
+<tr class="odd"><td>865</td><td>Augers and Accessories</td><td>2,042.24</td><td>2,042.24</td><td>0</td><td>0</td><td>4</td><td>2</td><td>510.56</td><td>0.0117</td><td>23</td></tr>
+<tr><td>250</td><td>Gravel Boards</td><td>1,971.7</td><td>1,971.7</td><td>0</td><td>0</td><td>134</td><td>27</td><td>14.71</td><td>0.0113</td><td>24</td></tr>
+<tr class="odd"><td>108</td><td>Compost and Bark</td><td>1,782.11</td><td>1,782.11</td><td>0</td><td>0</td><td>73</td><td>22</td><td>24.41</td><td>0.0102</td><td>25</td></tr>
+<tr><td>118</td><td>Kombi System - Stihl</td><td>1,770.32</td><td>1,770.32</td><td>0</td><td>0</td><td>8</td><td>8</td><td>221.29</td><td>0.0101</td><td>26</td></tr>
+<tr class="odd"><td>62</td><td>Coal and Logs</td><td>1,522.13</td><td>1,522.13</td><td>0</td><td>0</td><td>33</td><td>13</td><td>46.13</td><td>0.0087</td><td>27</td></tr>
+<tr><td>310</td><td>Petrol Chainsaws for Domestic Use</td><td>1,494.62</td><td>1,494.62</td><td>0</td><td>0</td><td>6</td><td>6</td><td>249.1</td><td>0.0085</td><td>28</td></tr>
+<tr class="odd"><td>658</td><td>Chainsaw Boots</td><td>1,479.7</td><td>1,239.7</td><td>-240</td><td>-0.1936</td><td>12</td><td>6</td><td>123.31</td><td>0.0084</td><td>29</td></tr>
+<tr><td>313</td><td>Professional Arborist Chainsaws</td><td>1,457.88</td><td>1,457.88</td><td>0</td><td>0</td><td>3</td><td>3</td><td>485.96</td><td>0.0083</td><td>30</td></tr>
+<tr class="odd"><td>171</td><td>Concrete Fencing</td><td>1,438.01</td><td>1,405.46</td><td>-32.55</td><td>-0.0232</td><td>112</td><td>26</td><td>12.84</td><td>0.0082</td><td>31</td></tr>
+<tr><td>372</td><td>Loop Handle Grass Trimmers</td><td>1,404.55</td><td>1,404.55</td><td>0</td><td>0</td><td>5</td><td>5</td><td>280.91</td><td>0.008</td><td>32</td></tr>
+<tr class="odd"><td>141</td><td>Versatool System - Honda</td><td>1,315.14</td><td>1,315.14</td><td>0</td><td>0</td><td>6</td><td>4</td><td>219.19</td><td>0.0075</td><td>33</td></tr>
+<tr><td>375</td><td>Cordless Trimmers &amp;amp; Brushcutters</td><td>1,187.68</td><td>1,187.68</td><td>0</td><td>0</td><td>5</td><td>5</td><td>237.54</td><td>0.0068</td><td>34</td></tr>
+<tr class="odd"><td>115</td><td>Weed Killers and Tree Stump Killers</td><td>1,154.77</td><td>1,154.77</td><td>0</td><td>0</td><td>14</td><td>11</td><td>82.48</td><td>0.0066</td><td>35</td></tr>
+<tr><td>98</td><td>Pole Pruners</td><td>1,105.99</td><td>1,105.99</td><td>0</td><td>0</td><td>3</td><td>3</td><td>368.66</td><td>0.0063</td><td>36</td></tr>
+<tr class="odd"><td>26</td><td>Ear Protection</td><td>1,055.48</td><td>1,055.48</td><td>0</td><td>0</td><td>9</td><td>6</td><td>117.28</td><td>0.006</td><td>37</td></tr>
+<tr><td>58</td><td>Ascenders and Descenders</td><td>1,052</td><td>862</td><td>-190</td><td>-0.2204</td><td>7</td><td>5</td><td>150.29</td><td>0.006</td><td>38</td></tr>
+<tr class="odd"><td>312</td><td>Petrol Chainsaws for Forestry</td><td>1,033.46</td><td>1,033.46</td><td>0</td><td>0</td><td>1</td><td>1</td><td>1,033.46</td><td>0.0059</td><td>39</td></tr>
+<tr><td>412</td><td>STIHL AP - Large Gardens &amp;amp; Professional</td><td>941.66</td><td>941.66</td><td>0</td><td>0</td><td>4</td><td>4</td><td>235.41</td><td>0.0054</td><td>40</td></tr>
+<tr class="odd"><td>162</td><td>Chipper Shredders</td><td>930.48</td><td>930.48</td><td>0</td><td>0</td><td>2</td><td>2</td><td>465.24</td><td>0.0053</td><td>41</td></tr>
+<tr><td>130</td><td>Arborist Climbing Helmets</td><td>900</td><td>900</td><td>0</td><td>0</td><td>5</td><td>2</td><td>180</td><td>0.0051</td><td>42</td></tr>
+<tr class="odd"><td>127</td><td>Scarifiers</td><td>878.07</td><td>878.07</td><td>0</td><td>0</td><td>3</td><td>3</td><td>292.69</td><td>0.005</td><td>43</td></tr>
+<tr><td>249</td><td>Post and Rail Fence</td><td>796.88</td><td>796.88</td><td>0</td><td>0</td><td>135</td><td>12</td><td>5.9</td><td>0.0045</td><td>44</td></tr>
+<tr class="odd"><td>669</td><td>Robotic Mowers</td><td>790.83</td><td>790.83</td><td>0</td><td>0</td><td>1</td><td>1</td><td>790.83</td><td>0.0045</td><td>45</td></tr>
+<tr><td>262</td><td>Safety Signs</td><td>782.83</td><td>782.83</td><td>0</td><td>0</td><td>21</td><td>6</td><td>37.28</td><td>0.0045</td><td>46</td></tr>
+<tr class="odd"><td>67</td><td>Ground working helmets</td><td>734.58</td><td>734.58</td><td>0</td><td>0</td><td>5</td><td>5</td><td>146.92</td><td>0.0042</td><td>47</td></tr>
+<tr><td>656</td><td>Chainsaw Trousers</td><td>713.16</td><td>713.16</td><td>0</td><td>0</td><td>6</td><td>6</td><td>118.86</td><td>0.0041</td><td>48</td></tr>
+<tr class="odd"><td>458</td><td>Chainsaw Guide Bars</td><td>637.5</td><td>637.5</td><td>0</td><td>0</td><td>5</td><td>4</td><td>127.5</td><td>0.0036</td><td>49</td></tr>
+<tr><td>421</td><td>Hayter Parts</td><td>592.84</td><td>592.84</td><td>0</td><td>0</td><td>27</td><td>25</td><td>21.96</td><td>0.0034</td><td>50</td></tr>
+<tr class="odd"><td>28</td><td>Replacement Handles</td><td>579.29</td><td>579.29</td><td>0</td><td>0</td><td>55</td><td>34</td><td>10.53</td><td>0.0033</td><td>51</td></tr>
+<tr><td>371</td><td>Bike Handle Brushcutters</td><td>577.13</td><td>577.13</td><td>0</td><td>0</td><td>1</td><td>1</td><td>577.13</td><td>0.0033</td><td>52</td></tr>
+<tr class="odd"><td>311</td><td>Petrol Chainsaws for Agriculture</td><td>576.58</td><td>576.58</td><td>0</td><td>0</td><td>1</td><td>1</td><td>576.58</td><td>0.0033</td><td>53</td></tr>
+<tr><td>603</td><td>Semi Chisel Chains</td><td>511.52</td><td>415.31</td><td>-96.21</td><td>-0.2317</td><td>49</td><td>10</td><td>10.44</td><td>0.0029</td><td>54</td></tr>
+<tr class="odd"><td>604</td><td>Full Chisel Chains</td><td>502.46</td><td>502.46</td><td>0</td><td>0</td><td>20</td><td>9</td><td>25.12</td><td>0.0029</td><td>55</td></tr>
+<tr><td>96</td><td>Landscaping and Fencing Tools</td><td>501.16</td><td>501.16</td><td>0</td><td>0</td><td>13</td><td>8</td><td>38.55</td><td>0.0029</td><td>56</td></tr>
+<tr class="odd"><td>208</td><td>Screws - Nails - Bolts and Staples</td><td>426.61</td><td>404.63</td><td>-21.98</td><td>-0.0543</td><td>231</td><td>40</td><td>1.85</td><td>0.0024</td><td>57</td></tr>
+<tr><td>79</td><td>Slashers</td><td>420.34</td><td>420.34</td><td>0</td><td>0</td><td>16</td><td>11</td><td>26.27</td><td>0.0024</td><td>58</td></tr>
+<tr class="odd"><td>380</td><td>Sheet Roofing &amp;amp; Accessories</td><td>411.97</td><td>411.97</td><td>0</td><td>0</td><td>35</td><td>6</td><td>11.77</td><td>0.0024</td><td>59</td></tr>
+<tr><td>215</td><td>Picket Fence Materials</td><td>405.95</td><td>405.95</td><td>0</td><td>0</td><td>50</td><td>8</td><td>8.12</td><td>0.0023</td><td>60</td></tr>
+<tr class="odd"><td>175</td><td>Tree Climbing Spikes</td><td>391.67</td><td>391.67</td><td>0</td><td>0</td><td>1</td><td>1</td><td>391.67</td><td>0.0022</td><td>61</td></tr>
+<tr><td>40</td><td>Climbing Carabiners and Connectors</td><td>360.66</td><td>360.66</td><td>0</td><td>0</td><td>22</td><td>7</td><td>16.39</td><td>0.0021</td><td>62</td></tr>
+<tr class="odd"><td>712</td><td>Grass Trimmer &amp;amp; Brushcutter Accessories</td><td>357.75</td><td>357.75</td><td>0</td><td>0</td><td>11</td><td>8</td><td>32.52</td><td>0.002</td><td>63</td></tr>
+<tr><td>415</td><td>Lubricants &amp;amp; Cleaners</td><td>328.81</td><td>328.81</td><td>0</td><td>0</td><td>27</td><td>21</td><td>12.18</td><td>0.0019</td><td>64</td></tr>
+<tr class="odd"><td>90</td><td>Arborist Ropes - Climbing &amp;amp; Lowering</td><td>306.96</td><td>306.96</td><td>0</td><td>0</td><td>5</td><td>3</td><td>61.39</td><td>0.0018</td><td>65</td></tr>
+<tr><td>102</td><td>Fliplines, Lanyards &amp;amp; Accessories</td><td>291.53</td><td>291.53</td><td>0</td><td>0</td><td>5</td><td>3</td><td>58.31</td><td>0.0017</td><td>66</td></tr>
+<tr class="odd"><td>125</td><td>Plant Feeds and Lawn Care</td><td>272.98</td><td>272.98</td><td>0</td><td>0</td><td>3</td><td>2</td><td>90.99</td><td>0.0016</td><td>67</td></tr>
+<tr><td>414</td><td>Engine Oils</td><td>262.05</td><td>262.05</td><td>0</td><td>0</td><td>73</td><td>9</td><td>3.59</td><td>0.0015</td><td>68</td></tr>
+<tr class="odd"><td>140</td><td>Saw Horses</td><td>252.51</td><td>252.51</td><td>0</td><td>0</td><td>4</td><td>4</td><td>63.13</td><td>0.0014</td><td>69</td></tr>
+<tr><td>94</td><td>Digging Tools</td><td>251.65</td><td>251.65</td><td>0</td><td>0</td><td>9</td><td>6</td><td>27.96</td><td>0.0014</td><td>70</td></tr>
+<tr class="odd"><td>455</td><td>Service Kits</td><td>250.24</td><td>250.24</td><td>0</td><td>0</td><td>16</td><td>14</td><td>15.64</td><td>0.0014</td><td>71</td></tr>
+<tr><td>354</td><td>Fencing Accessories</td><td>243.81</td><td>243.81</td><td>0</td><td>0</td><td>27</td><td>13</td><td>9.03</td><td>0.0014</td><td>72</td></tr>
+<tr class="odd"><td>258</td><td>Stihl Kids</td><td>243.08</td><td>243.08</td><td>0</td><td>0</td><td>7</td><td>3</td><td>34.73</td><td>0.0014</td><td>73</td></tr>
+<tr><td>879</td><td>Pressure Washer Attachments</td><td>243.06</td><td>243.06</td><td>0</td><td>0</td><td>8</td><td>8</td><td>30.38</td><td>0.0014</td><td>74</td></tr>
+<tr class="odd"><td>411</td><td>STIHL AK - Sm, Med &amp;amp; Lge Gardens</td><td>243</td><td>243</td><td>0</td><td>0</td><td>1</td><td>1</td><td>243</td><td>0.0014</td><td>75</td></tr>
+<tr><td>196</td><td>Fence Post Caps and Finials</td><td>236.37</td><td>236.37</td><td>0</td><td>0</td><td>113</td><td>30</td><td>2.09</td><td>0.0013</td><td>76</td></tr>
+<tr class="odd"><td>202</td><td>First Aid</td><td>225.66</td><td>225.66</td><td>0</td><td>0</td><td>6</td><td>3</td><td>37.61</td><td>0.0013</td><td>77</td></tr>
+<tr><td>221</td><td>Wet and Dry Vacuum Cleaners</td><td>224.49</td><td>224.49</td><td>0</td><td>0</td><td>6</td><td>5</td><td>37.42</td><td>0.0013</td><td>78</td></tr>
+<tr class="odd"><td>1,474</td><td>Milwaukee</td><td>215</td><td>215</td><td>0</td><td>0</td><td>1</td><td>1</td><td>215</td><td>0.0012</td><td>79</td></tr>
+<tr><td>88</td><td>Pulleys</td><td>196.19</td><td>196.19</td><td>0</td><td>0</td><td>8</td><td>2</td><td>24.52</td><td>0.0011</td><td>80</td></tr>
+<tr class="odd"><td>47</td><td>Axes</td><td>178.98</td><td>178.98</td><td>0</td><td>0</td><td>7</td><td>7</td><td>25.57</td><td>0.001</td><td>81</td></tr>
+<tr><td>182</td><td>Clips and Brackets for Fencing</td><td>178.29</td><td>178.29</td><td>0</td><td>0</td><td>101</td><td>10</td><td>1.77</td><td>0.001</td><td>82</td></tr>
+<tr class="odd"><td>189</td><td>Hinges and Latches for Garden Gates</td><td>175.16</td><td>175.16</td><td>0</td><td>0</td><td>14</td><td>9</td><td>12.51</td><td>0.001</td><td>83</td></tr>
+<tr><td>655</td><td>DuroCut Heads</td><td>174.64</td><td>174.64</td><td>0</td><td>0</td><td>19</td><td>9</td><td>9.19</td><td>0.001</td><td>84</td></tr>
+<tr class="odd"><td>367</td><td>Secateurs</td><td>174.37</td><td>174.37</td><td>0</td><td>0</td><td>2</td><td>2</td><td>87.19</td><td>0.001</td><td>85</td></tr>
+<tr><td>149</td><td>Replacement Tree Lopper Springs and Parts</td><td>172.46</td><td>169.14</td><td>-3.32</td><td>-0.0196</td><td>55</td><td>42</td><td>3.14</td><td>0.001</td><td>86</td></tr>
+<tr class="odd"><td>143</td><td>Accessories</td><td>156</td><td>156</td><td>0</td><td>0</td><td>4</td><td>3</td><td>39</td><td>0.0009</td><td>87</td></tr>
+<tr><td>611</td><td>AutoCut Heads</td><td>154.3</td><td>154.3</td><td>0</td><td>0</td><td>8</td><td>7</td><td>19.29</td><td>0.0009</td><td>88</td></tr>
+<tr class="odd"><td>132</td><td>Farm and Entrance Gate Fixings</td><td>144.58</td><td>144.58</td><td>0</td><td>0</td><td>14</td><td>7</td><td>10.33</td><td>0.0008</td><td>89</td></tr>
+<tr><td>657</td><td>Chainsaw Gloves</td><td>138.6</td><td>138.6</td><td>0</td><td>0</td><td>4</td><td>4</td><td>34.65</td><td>0.0008</td><td>90</td></tr>
+<tr class="odd"><td>446</td><td>Safety Signs &amp;amp; PPE</td><td>135</td><td>135</td><td>0</td><td>0</td><td>3</td><td>2</td><td>45</td><td>0.0008</td><td>91</td></tr>
+<tr><td>177</td><td>Wood Treatments and Preservatives</td><td>133</td><td>133</td><td>0</td><td>0</td><td>9</td><td>6</td><td>14.78</td><td>0.0008</td><td>92</td></tr>
+<tr class="odd"><td>667</td><td>Chainsaw Bar &amp;amp; Chain Cut-Kits</td><td>132.86</td><td>132.86</td><td>0</td><td>0</td><td>2</td><td>2</td><td>66.43</td><td>0.0008</td><td>93</td></tr>
+<tr><td>60</td><td>Clothing</td><td>128.44</td><td>128.44</td><td>0</td><td>0</td><td>19</td><td>10</td><td>6.76</td><td>0.0007</td><td>94</td></tr>
+<tr class="odd"><td>191</td><td>Gloves</td><td>127.62</td><td>127.62</td><td>0</td><td>0</td><td>29</td><td>21</td><td>4.4</td><td>0.0007</td><td>95</td></tr>
+<tr><td>42</td><td>Hay and Manure Forks</td><td>126.14</td><td>126.14</td><td>0</td><td>0</td><td>5</td><td>3</td><td>25.23</td><td>0.0007</td><td>96</td></tr>
+<tr class="odd"><td>670</td><td>Robotic Mower Accessories</td><td>105.35</td><td>105.35</td><td>0</td><td>0</td><td>7</td><td>4</td><td>15.05</td><td>0.0006</td><td>97</td></tr>
+<tr><td>76</td><td>Rakes - Brooms and Brushes</td><td>99.07</td><td>99.07</td><td>0</td><td>0</td><td>3</td><td>2</td><td>33.02</td><td>0.0006</td><td>98</td></tr>
+<tr class="odd"><td>45</td><td>Chainlink Fencing</td><td>89.95</td><td>89.95</td><td>0</td><td>0</td><td>5</td><td>1</td><td>17.99</td><td>0.0005</td><td>99</td></tr>
+<tr><td>609</td><td>Trimmer Line</td><td>88.12</td><td>88.12</td><td>0</td><td>0</td><td>9</td><td>8</td><td>9.79</td><td>0.0005</td><td>100</td></tr>
+<tr class="odd"><td>72</td><td>Miscellaneous</td><td>84.09</td><td>84.09</td><td>0</td><td>0</td><td>143</td><td>26</td><td>0.59</td><td>0.0005</td><td>101</td></tr>
+<tr><td>105</td><td>Wheel Barrows</td><td>79.99</td><td>79.99</td><td>0</td><td>0</td><td>1</td><td>1</td><td>79.99</td><td>0.0005</td><td>102</td></tr>
+<tr class="odd"><td>93</td><td>Wolf Garten Tools</td><td>74.98</td><td>74.98</td><td>0</td><td>0</td><td>3</td><td>2</td><td>24.99</td><td>0.0004</td><td>103</td></tr>
+<tr><td>370</td><td>Hedge &amp;amp; Lawn Shears</td><td>74.58</td><td>50.84</td><td>-23.74</td><td>-0.467</td><td>2</td><td>1</td><td>37.29</td><td>0.0004</td><td>104</td></tr>
+<tr class="odd"><td>194</td><td>Spare Parts</td><td>72</td><td>67</td><td>-5</td><td>-0.0746</td><td>14</td><td>5</td><td>5.14</td><td>0.0004</td><td>105</td></tr>
+<tr><td>1,884</td><td>Batteries &amp;amp; Chargers</td><td>69.99</td><td>69.99</td><td>0</td><td>0</td><td>1</td><td>1</td><td>69.99</td><td>0.0004</td><td>106</td></tr>
+<tr class="odd"><td>613</td><td>Polycut Blades &amp;amp; Heads</td><td>67.28</td><td>67.28</td><td>0</td><td>0</td><td>3</td><td>3</td><td>22.43</td><td>0.0004</td><td>107</td></tr>
+<tr><td>610</td><td>Trimmer Spools</td><td>59.7</td><td>59.7</td><td>0</td><td>0</td><td>9</td><td>4</td><td>6.63</td><td>0.0003</td><td>108</td></tr>
+<tr class="odd"><td>861</td><td>Files and Handles</td><td>58.65</td><td>58.65</td><td>0</td><td>0</td><td>16</td><td>3</td><td>3.67</td><td>0.0003</td><td>109</td></tr>
+<tr><td>150</td><td>Multi System - Stihl</td><td>56.66</td><td>56.66</td><td>0</td><td>0</td><td>1</td><td>1</td><td>56.66</td><td>0.0003</td><td>110</td></tr>
+<tr class="odd"><td>259</td><td>Rock Salt</td><td>45</td><td>45</td><td>0</td><td>0</td><td>3</td><td>2</td><td>15</td><td>0.0003</td><td>111</td></tr>
+<tr><td>99</td><td>Felling Wedges</td><td>39.19</td><td>39.19</td><td>0</td><td>0</td><td>4</td><td>2</td><td>9.8</td><td>0.0002</td><td>112</td></tr>
+<tr class="odd"><td>133</td><td>Garden Tool and Blade Sharpening</td><td>36.03</td><td>36.03</td><td>0</td><td>0</td><td>4</td><td>3</td><td>9.01</td><td>0.0002</td><td>113</td></tr>
+<tr><td>37</td><td>Maintenance Tools and Accessories</td><td>26.82</td><td>26.82</td><td>0</td><td>0</td><td>2</td><td>2</td><td>13.41</td><td>0.0002</td><td>114</td></tr>
+<tr class="odd"><td>164</td><td>Wire and Stock Fencing</td><td>26.28</td><td>26.28</td><td>0</td><td>0</td><td>3</td><td>3</td><td>8.76</td><td>0.0001</td><td>115</td></tr>
+<tr><td>160</td><td>Charcoal and BBQ</td><td>20.94</td><td>20.94</td><td>0</td><td>0</td><td>1</td><td>1</td><td>20.94</td><td>0.0001</td><td>116</td></tr>
+<tr class="odd"><td>91</td><td>Hoses - Watering and Sprayers</td><td>19.99</td><td>19.99</td><td>0</td><td>0</td><td>1</td><td>1</td><td>19.99</td><td>0.0001</td><td>117</td></tr>
+<tr><td>53</td><td>Throw lines - Bags and Catapults</td><td>18</td><td>18</td><td>0</td><td>0</td><td>1</td><td>1</td><td>18</td><td>0.0001</td><td>118</td></tr>
+<tr class="odd"><td>828</td><td>Hedge Trimmer Accessories</td><td>14.42</td><td>14.42</td><td>0</td><td>0</td><td>1</td><td>1</td><td>14.42</td><td>0.0001</td><td>119</td></tr>
+<tr><td>134</td><td>Safety Glasses</td><td>14.05</td><td>14.05</td><td>0</td><td>0</td><td>1</td><td>1</td><td>14.05</td><td>0.0001</td><td>120</td></tr>
+<tr class="odd"><td>55</td><td>Hats and Baseball Caps</td><td>4.99</td><td>4.99</td><td>0</td><td>0</td><td>1</td><td>1</td><td>4.99</td><td>0</td><td>121</td></tr>
+<tr><td>205</td><td>Glue and Adhesive Tape</td><td>3.99</td><td>3.99</td><td>0</td><td>0</td><td>1</td><td>1</td><td>3.99</td><td>0</td><td>122</td></tr>
+<tr class="odd"><td>83</td><td>Pest Control</td><td>3.85</td><td>3.85</td><td>0</td><td>0</td><td>1</td><td>1</td><td>3.85</td><td>0</td><td>123</td></tr>
+<tr><td>403</td><td>Agricultural Farm Fencing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>139</td><td>Grass Trimmers and Brushcutters</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>260</td><td>Landscape Fabrics and Fruit Cage Netting</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>612</td><td>Brushcutter Blades</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>87</td><td>DMM</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>33</td><td>Tree Guards and Ties</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>123</td><td>Forestry Accessories</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>248</td><td>Fall Arresters</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>77</td><td>Ice Scrapers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>224</td><td>Construction</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>420</td><td>Chainsaw Chains</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,399</td><td>MTD Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>64</td><td>Rutland Electric Fencing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>161</td><td>Cambium Savers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>818</td><td>Machine Accessories</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>410</td><td>STIHL AI Line - Small Gardens</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>147</td><td>Tree Climbing Harnesses</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>378</td><td>Electric Grass Trimmers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>256</td><td>Hi Vis Clothing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>605</td><td>Milling Chains</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>82</td><td>Padlocks and Locking Bolts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>236</td><td>Hoodies and Jumpers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>426</td><td>Sharpening/Grinding Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,572</td><td>Jacksons</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>166</td><td>Measuring - Surveying and Marking out</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>917</td><td>Artificial Grass</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>152</td><td>Lowering Devices</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>203</td><td>Ladders</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>404</td><td>CLEARANCE</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>35</td><td>Garden Machinery</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,906</td><td>Power Tool Blowout</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>178</td><td>Tillers and Rotovators</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>15</td><td>Uncategorized</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>228</td><td>Wilkinson Sword</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,459</td><td>Durapost Fencing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>65</td><td>Electric Fencing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>315</td><td>Electric Chainsaws</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>54</td><td>Clothing and Merchandise</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>148</td><td>Chainsaw Protective Clothing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>271</td><td>Platform Steps</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>659</td><td>Honda Cordless</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>379</td><td>Professional Clearing Saws</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>41</td><td>Agricultural Tools</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>257</td><td>T-Shirts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>190</td><td>Books and Literature for Tree Workers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>29</td><td>Brand</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>240</td><td>Sawpod</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>427</td><td>Briggs &amp;amp; Stratton Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,574</td><td>Handheld Pruner</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>368</td><td>Pruning Saws</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>877</td><td>Spreaders</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>416</td><td>Trimmer Line &amp;amp; Blades</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,211</td><td>Paving</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>61</td><td>Seasonal Products</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>153</td><td>DeWalt</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>204</td><td>Lightweight Tripod Ladder</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>405</td><td>Composite Decking</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>48</td><td>Mauls and Hatchets</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>263</td><td>Extending Ladders</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>36</td><td>Consumables</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>126</td><td>Bayer Garden</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,907</td><td>11</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>180</td><td>Petrol Post Driver</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>373</td><td>Professional Back Pack Brushcutters</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>25</td><td>PPE &amp;amp; Safety</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>112</td><td>Pressure Washers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>230</td><td>Matabi</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>422</td><td>Honda Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>316</td><td>Chainsaw Accessories</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>843</td><td>Garden Machinery Sale</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>211</td><td>Castle Clothing</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>272</td><td>Combination Ladders</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>660</td><td>Hayter &amp;amp; Toro Cordless</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>85</td><td>Cofra</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>242</td><td>Tool Strops</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>434</td><td>Insulated Digging Tools</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,580</td><td>Chainsaws</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>75</td><td>Sheds and Structures</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>172</td><td>Drag Tools</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>369</td><td>Extending Pole Saws</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>104</td><td>Spares and Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>222</td><td>Swivels</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>417</td><td>Pressure Washer Fluids</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,296</td><td>Toro Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>157</td><td>Log Splitters</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>671</td><td>Supercut Heads</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>408</td><td>Cordless Garden Machinery</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>49</td><td>Hardware and DIY</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>142</td><td>Brushcutter Trousers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>265</td><td>Forgefix</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>198</td><td>Mixers - Cement Mixers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>252</td><td>Climbing Gloves</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,908</td><td>Special Offers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>80</td><td>Torches &amp;amp; Headlamps</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>374</td><td>Wheeled Grass Trimmers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>232</td><td>Gripple</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>424</td><td>Wheelbarrow Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,497</td><td>Arborist Machinery</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>69</td><td>Pruning Tools</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>853</td><td>Real Deals for You</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>212</td><td>Jackets</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>413</td><td>Professional Lawn Mowers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>56</td><td>STIHL Merchandise</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>274</td><td>Masonry Fixings</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>201</td><td>Lawn Mowers - Robotic</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>402</td><td>Garden Sundries</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>44</td><td>Fencing and Landscaping</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>136</td><td>Climbing Kit Bags</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>86</td><td>Footwear and Accessories</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>193</td><td>Duracell</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>32</td><td>Gardening Products</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>122</td><td>Chainsaws and Accessories</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>244</td><td>Bins and Incinerators</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>440</td><td>Drill &amp;amp; Screwdriver Bits</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,879</td><td>Lawn Edging &amp;amp; Tree Rings</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>418</td><td>Pre Mixed Fuel</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,393</td><td>Kawasaki Parts</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>207</td><td>Rigging</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>409</td><td>STIHL AS - Small Handheld</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>50</td><td>DIY Tools</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>266</td><td>Lifting Slings</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>200</td><td>Viking</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>39</td><td>Arborist Equipment</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>1,909</td><td>Decking Offers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>81</td><td>Prusik Rope - Accessory Cords and Slings</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>186</td><td>Screenwash and De Icer</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>27</td><td>Forestry &amp;amp; Agricultural</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>425</td><td>Spark Plugs</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>1,568</td><td>STIHL</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>165</td><td>Novelty Plaques</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>366</td><td>Loppers</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>151</td><td>Sacks and Bags</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr><td>275</td><td>Access and Work Platforms</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+<tr class="odd"><td>668</td><td>Weedol</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>&nbsp;</td><td>0</td><td>124</td></tr>
+</table></body></html>
